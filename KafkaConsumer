@@ -1,0 +1,95 @@
+package com.madhav.code.kafka.poc.consumer;
+
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.madhav.code.kafka.poc.data.MessagePayload;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.springframework.kafka.annotation.DltHandler;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.annotation.RetryableTopic;
+import org.springframework.kafka.retrytopic.RetryTopicHeaders;
+import org.springframework.kafka.retrytopic.TopicSuffixingStrategy;
+import org.springframework.kafka.support.Acknowledgment;
+import org.springframework.messaging.handler.annotation.Header;
+import org.springframework.retry.annotation.Backoff;
+import org.springframework.stereotype.Component;
+
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class ClKafkaConsumer {
+
+    private final ObjectMapper objectMapper;
+
+    @RetryableTopic(attempts = "4", backoff = @Backoff(delay = 1000, multiplier = 2.0, maxDelay = 20000, random = true), autoCreateTopics = "false", include = {Exception.class}, topicSuffixingStrategy = TopicSuffixingStrategy.SUFFIX_WITH_INDEX_VALUE, dltTopicSuffix = "-dlt", retryTopicSuffix = "-retry")
+    @KafkaListener(topics = "main-topic", groupId = "${spring.kafka.consumer.group-id}", containerFactory = "kafkaListenerContainerFactory")
+    public void consume(ConsumerRecord<String, Object> record,
+                        @Header(name = RetryTopicHeaders.DEFAULT_HEADER_ATTEMPTS, required = false) Integer attempt,
+                        Acknowledgment ack) {
+        try {
+            log.info("Consumed message: key={}, value={}, partition={}, offset={}, attempt={}", record.key(), record.value(), record.partition(), record.offset(), attempt);
+            String string = objectMapper.writeValueAsString(record.value());
+            throw new RuntimeException("Simulate");
+            //ack.acknowledge();
+        } catch (Exception ex) {
+            log.error("Error while processing batch. Triggering retry...");
+            throw new RuntimeException(ex);
+        }
+    }
+
+    @DltHandler
+    public void handleDltMessage(ConsumerRecord<String, Object> record, Acknowledgment ack) {
+        try {
+            String exceptionMessage = getHeader(record, "kafka_exception-message");
+            String stackTrace = getHeader(record, "kafka_exception-stacktrace");
+            String rootCauseClass = getHeader(record, "kafka_exception-cause-fqcn");
+            String originalTopic = getHeader(record, "kafka_original-topic");
+            String originalPartition = getHeader(record, "kafka_original-partition");
+            String originalOffset = getHeader(record, "kafka_original-offset");
+
+            log.error("""
+                    DLT Message Received:
+                    ➤ Topic: {}
+                    ➤ Partition: {}
+                    ➤ Offset: {}
+                    ➤ Key: {}
+                    ➤ Value: {}
+                    ➤ Exception: {}
+                    ➤ Root Cause: {}
+                    ➤ Stack Trace: {}
+                    """, originalTopic, originalPartition, originalOffset, record.key(), record.value(), exceptionMessage, rootCauseClass, new String(stackTrace.getBytes()));
+
+            // In future: you can store these details into MongoDB or Elastic easily.
+        } catch (Exception e) {
+            log.error("Error while processing DLT message metadata");
+        } finally {
+            ack.acknowledge();
+        }
+    }
+
+    /**
+     * Safely extracts Kafka header value as string.
+     */
+    private String getHeader(ConsumerRecord<String, Object> record, String headerKey) {
+        if (record.headers() == null) return null;
+        var header = record.headers().lastHeader(headerKey);
+        if (header == null) return null;
+
+        // For numeric headers like partition / offset, decode properly
+        if (headerKey.equals("kafka_original-partition") && header.value() != null) {
+            return String.valueOf(ByteBuffer.wrap(header.value()).getInt());
+        }
+        if (headerKey.equals("kafka_original-offset") && header.value() != null) {
+            return String.valueOf(ByteBuffer.wrap(header.value()).getLong());
+        }
+
+        // For everything else, treat as UTF-8 string
+        return new String(header.value(), StandardCharsets.UTF_8);
+    }
+
+}
