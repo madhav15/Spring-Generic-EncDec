@@ -1,0 +1,69 @@
+package com.madhav.code.kafka.poc.config;
+
+import lombok.extern.slf4j.Slf4j;
+import org.apache.kafka.common.serialization.Deserializer;
+import org.apache.kafka.common.serialization.StringDeserializer;
+import org.springframework.kafka.support.serializer.JsonDeserializer;
+
+import java.nio.charset.StandardCharsets;
+
+@Slf4j
+public class HybridKafkaDeserializer implements Deserializer<Object> {
+
+    private final JsonDeserializer<Object> jsonDeserializer = new JsonDeserializer<>(Object.class);
+    private final StringDeserializer stringDeserializer = new StringDeserializer();
+
+    public HybridKafkaDeserializer() {
+        jsonDeserializer.addTrustedPackages("*");
+        jsonDeserializer.setUseTypeHeaders(false);
+        jsonDeserializer.ignoreTypeHeaders();
+    }
+
+    @Override
+    public Object deserialize(String topic, byte[] data) {
+        if (data == null) return null;
+
+        // First, try standard JSON
+        try {
+            return jsonDeserializer.deserialize(topic, data);
+        } catch (Exception e1) {
+            // Fall back to string handling
+            String raw = new String(data, StandardCharsets.UTF_8);
+            try {
+                String cleaned = unescapeAndStripQuotes(raw);
+                return jsonDeserializer.deserialize(topic, cleaned.getBytes(StandardCharsets.UTF_8));
+            } catch (Exception e2) {
+                log.warn("HybridKafkaDeserializer: Returning raw string for topic {} after JSON parse failure: {}", topic, raw);
+                return raw;
+            }
+        }
+    }
+
+    /**
+     * Removes any number of wrapping quotes and unescapes backslash sequences.
+     */
+    private String unescapeAndStripQuotes(String input) {
+        if (input == null) return null;
+        String candidate = input.trim();
+
+        // Remove multiple outer quotes (double/triple quoted)
+        while ((candidate.startsWith("\"") && candidate.endsWith("\"")) ||
+                (candidate.startsWith("'") && candidate.endsWith("'"))) {
+            candidate = candidate.substring(1, candidate.length() - 1);
+        }
+
+        // Unescape
+        candidate = candidate.replace("\\\"", "\"")
+                .replace("\\\\", "\\")
+                .replace("\\n", "\n")
+                .replace("\\r", "\r")
+                .replace("\\t", "\t");
+        return candidate;
+    }
+
+    @Override
+    public void close() {
+        jsonDeserializer.close();
+        stringDeserializer.close();
+    }
+}
