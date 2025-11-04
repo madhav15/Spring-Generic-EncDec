@@ -2,7 +2,6 @@ package com.madhav.code.kafka.poc.consumer;
 
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.madhav.code.kafka.poc.data.MessagePayload;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -22,7 +21,7 @@ import java.nio.charset.StandardCharsets;
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class ClKafkaConsumer {
+public class KafkaConsumer {
 
     private final ObjectMapper objectMapper;
 
@@ -32,15 +31,26 @@ public class ClKafkaConsumer {
                         @Header(name = RetryTopicHeaders.DEFAULT_HEADER_ATTEMPTS, required = false) Integer attempt,
                         Acknowledgment ack) {
         try {
-            log.info("Consumed message: key={}, value={}, partition={}, offset={}, attempt={}", record.key(), record.value(), record.partition(), record.offset(), attempt);
-            String string = objectMapper.writeValueAsString(record.value());
-            throw new RuntimeException("Simulate");
-            //ack.acknowledge();
+            Object rawVal = record.value();
+            String stringValue;
+
+            if (rawVal instanceof String strVal) {
+                stringValue = cleanStringifiedJson(strVal);
+            } else {
+                // object (already parsed JSON)
+                stringValue = objectMapper.writeValueAsString(rawVal);
+            }
+
+            log.info("consumed this message {}", stringValue);
+
+            ack.acknowledge();
         } catch (Exception ex) {
             log.error("Error while processing batch. Triggering retry...");
             throw new RuntimeException(ex);
         }
     }
+
+
 
     @DltHandler
     public void handleDltMessage(ConsumerRecord<String, Object> record, Acknowledgment ack) {
@@ -91,5 +101,62 @@ public class ClKafkaConsumer {
         // For everything else, treat as UTF-8 string
         return new String(header.value(), StandardCharsets.UTF_8);
     }
+
+    private String cleanStringifiedJson(String val) {
+        try {
+            if (val == null || val.isBlank()) {
+                return val;
+            }
+
+            // 🔹 Step 1: remove control characters and trim
+            String trimmed = val.replaceAll("[\\r\\n\\u0000]", "").trim();
+
+            // 🔹 Step 2: unescape common sequences early
+            trimmed = trimmed
+                    .replace("\\\"", "\"")
+                    .replace("\\\\", "\\")
+                    .trim();
+
+            // 🔹 Step 3: remove multiple layers of wrapping quotes
+            while ((trimmed.startsWith("\"") && trimmed.endsWith("\"")) ||
+                    (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+                trimmed = trimmed.substring(1, trimmed.length() - 1);
+            }
+
+            // 🔹 Step 4: check if it's now clean JSON (object or array)
+            if ((trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+                    (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+                return trimmed;
+            }
+
+            // 🔹 Step 5: attempt one decode cycle using ObjectMapper
+            try {
+                String decoded = objectMapper.readValue(trimmed, String.class);
+                decoded = decoded.trim();
+                if ((decoded.startsWith("{") && decoded.endsWith("}")) ||
+                        (decoded.startsWith("[") && decoded.endsWith("]"))) {
+                    return decoded;
+                }
+                return decoded;
+            } catch (Exception decodeEx) {
+                // 🔹 Step 6: last fallback unescape
+                String unescaped = trimmed
+                        .replace("\\\"", "\"")
+                        .replace("\\\\", "\\")
+                        .trim();
+                if ((unescaped.startsWith("{") && unescaped.endsWith("}")) ||
+                        (unescaped.startsWith("[") && unescaped.endsWith("]"))) {
+                    return unescaped;
+                }
+                return unescaped;
+            }
+
+        } catch (Exception e) {
+            // 🔹 Step 7: return original value if everything fails
+            return val;
+        }
+    }
+
+
 
 }
